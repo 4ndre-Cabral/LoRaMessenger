@@ -35,6 +35,10 @@ extern uint32_t dbg_rxCount;
 extern int8_t   dbg_lastRssi;
 extern uint8_t  dbg_lastType, dbg_lastFrom, dbg_lastTo, dbg_lastWhy;
 
+extern Page page;
+extern SSD1306Wire oled;
+extern bool blinkOn;     // use the same blinkOn you already have in ui.cpp
+
 void VextON()  { pinMode(Vext, OUTPUT); digitalWrite(Vext, LOW);  }
 void VextOFF() { pinMode(Vext, OUTPUT); digitalWrite(Vext, HIGH); }
 
@@ -69,6 +73,9 @@ void uiTick(){
   if ((now - lastBlink) >= PERIOD) {
     lastBlink = now;
     blinkOn = !blinkOn;
+
+    // TEMP: show the blinker bit always, to prove the timer runs
+    // uiDebugBlinkOverlay();
 
     if (page == PAGE_CHAT || page == PAGE_BROADCAST) {
       // only repaint the bottom band where the caret lives
@@ -390,10 +397,19 @@ void uiRedrawComposeBand(bool push = true) {
   // caret (block when on, hollow when off)
   int caretX = textW;
   if (caretX > COMPOSE_MAX_PX - 2) caretX = COMPOSE_MAX_PX - 2;
+  const int caretY = baseY + 8;
+  const int caretW = 6;
+  const int caretH = 2;          // a hair taller to pop more
+
   if (blinkOn) {
-    oled.fillRect(caretX, baseY + 8, 6, 2);
+    // solid white block
+    oled.setColor(WHITE);
+    oled.fillRect(caretX, caretY, caretW, caretH);
   } else {
-    oled.drawRect(caretX, baseY + 8, 6, 2);
+    // solid black to "erase" the caret area (very visible blink)
+    oled.setColor(BLACK);
+    oled.fillRect(caretX, caretY, caretW, caretH);
+    oled.setColor(WHITE);        // restore draw color for anything after
   }
 
   // send icon
@@ -483,4 +499,19 @@ void uiDrawRadioDebugOverlay(){
   snprintf(line, sizeof(line), "RX:%lu T:%u F:%u->%u L? RSSI:%d W:%u",
            (unsigned long)dbg_rxCount, dbg_lastType, dbg_lastFrom, dbg_lastTo, dbg_lastRssi, dbg_lastWhy);
   oled.drawString(0, 54, line); // adjust Y if your footer uses 56
+}
+
+void uiDebugBlinkOverlay() {
+  // Draw a 4x4 dot in the top-left that flips state with blinkOn.
+  // Does not clear the screen; very cheap.
+  const int x = 0, y = 0, sz = 4;
+  if (blinkOn) {
+    oled.setColor(WHITE);
+    oled.fillRect(x, y, sz, sz);
+  } else {
+    oled.setColor(BLACK);
+    oled.fillRect(x, y, sz, sz);
+    oled.setColor(WHITE);     // restore for normal drawing
+  }
+  oled.display();
 }

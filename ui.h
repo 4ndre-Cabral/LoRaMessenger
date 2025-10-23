@@ -54,3 +54,5 @@ bool inviteInProgress();
 void uiForceBlinkRestart();
 
 void uiToast(const String& msg);
+
+void uiDebugBlinkOverlay();

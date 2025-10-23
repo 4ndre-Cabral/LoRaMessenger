@@ -20,7 +20,7 @@ void loop() {
   protocolPoll();        // LoRa parse + dispatch
   protocolSearchTick();
   inputPoll();           // keypad/T9 + page routing
-  uiTick();              // cursor blink / small animations
   buzzTick();            // non-blocking beeps
   vibTick();             // non-blocking vibration (optional)
+  uiTick();              // cursor blink / small animations
 }
