@@ -18,7 +18,8 @@ void setup() {
 
 void loop() {
   protocolPoll();        // LoRa parse + dispatch
-  protocolSearchTick();
+  protocolPendingTick();
+  // protocolSearchTick();
   inputPoll();           // keypad/T9 + page routing
   buzzTick();            // non-blocking beeps
   vibTick();             // non-blocking vibration (optional)
