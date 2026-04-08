@@ -42,12 +42,72 @@ extern uint8_t  dbg_lastType, dbg_lastFrom, dbg_lastTo, dbg_lastWhy;
 void VextON()  { pinMode(Vext, OUTPUT); digitalWrite(Vext, LOW);  }
 void VextOFF() { pinMode(Vext, OUTPUT); digitalWrite(Vext, HIGH); }
 
-static void bootSplash(const char* step) {
+// ───────────────────────────────────────────────
+//  Animated boot screen
+//  Layout (128×64):
+//    y= 2       "LoRaMessenger"  |  "v2"
+//    y=13       ─────────────────────────────
+//    y=15‥33   LoRa-wave logo (3 arcs + dot)
+//               centre at (64, 30)
+//    y=38       step label
+//    y=48       ─────────────────────────────
+//    y=50‥58   progress bar  [████░░░░░░░░]
+// ───────────────────────────────────────────────
+
+static int g_bootStep = 0;      // 0 = not started, incremented by uiBootStep()
+static const int BOOT_TOTAL = 6; // number of uiBootStep() calls in setup()
+
+// Draw the upper half of a circle as a pixel-art arc.
+// Only pixels at y < cy are placed; endpoints (y == cy) are included
+// to anchor the arc visually at the same baseline as the centre dot.
+static void bootDrawArc(int cx, int cy, int r) {
+  for (int dx = -r; dx <= r; dx++) {
+    int dy2 = r * r - dx * dx;
+    if (dy2 < 0) continue;
+    int dy = (int)sqrtf((float)dy2);
+    int px = cx + dx;
+    int py = cy - dy;
+    if (px >= 0 && px < 128 && py >= 0 && py < 64)
+      oled.setPixel(px, py);
+  }
+}
+
+// Draw the complete boot frame.
+//   step  : 0-BOOT_TOTAL (controls progress bar fill)
+//   label : current step string shown below the logo
+//   phase : 0=dot only | 1=+inner arc | 2=+mid arc | 3=+outer arc
+static void drawBootFrame(int step, const char* label, int phase) {
+  const int CX = 64, CY = 30;   // logo centre
+
   oled.clear();
   oled.setFont(ArialMT_Plain_10);
+
+  // ── Header ──────────────────────────────────
   oled.setTextAlignment(TEXT_ALIGN_LEFT);
-  oled.drawString(0, 0,  "LoRaMessenger v2");
-  oled.drawString(0, 14, step);
+  oled.drawString(0, 2, "LoRaMessenger");
+  oled.setTextAlignment(TEXT_ALIGN_RIGHT);
+  oled.drawString(127, 2, "v2");
+  oled.drawHorizontalLine(0, 13, 128);
+
+  // ── LoRa-wave logo ──────────────────────────
+  // Centre dot (filled 5×5 circle)
+  oled.fillCircle(CX, CY, 2);
+  // Arcs animate in one by one
+  if (phase >= 1) bootDrawArc(CX, CY,  7);   // inner  arc
+  if (phase >= 2) bootDrawArc(CX, CY, 12);   // middle arc
+  if (phase >= 3) bootDrawArc(CX, CY, 18);   // outer  arc
+
+  // ── Step label ──────────────────────────────
+  oled.setTextAlignment(TEXT_ALIGN_LEFT);
+  oled.drawString(0, 38, label);
+
+  // ── Progress bar ────────────────────────────
+  oled.drawHorizontalLine(0, 48, 128);
+  oled.drawRect(3, 50, 122, 9);              // outer border
+  int fill = (step > 0) ? (step * 120) / BOOT_TOTAL : 0;
+  if (fill > 120) fill = 120;
+  if (fill >   0) oled.fillRect(4, 51, fill, 7);  // inner fill
+
   oled.display();
 }
 
@@ -57,12 +117,27 @@ void appInitHardware(){
   oled.init();
   oled.displayOn();
   oled.setContrast(255);
-  bootSplash("Starting...");
+
+  // Animated intro: centre dot appears, then each arc draws in turn.
+  // phase 0 (dot)    : 400 ms — user sees the first element
+  // phase 1 (inner)  : 350 ms
+  // phase 2 (middle) : 350 ms
+  // phase 3 (outer)  : 350 ms → hold 600 ms with full logo
+  static const uint16_t arcDelays[] = { 400, 350, 350, 350 };
+  for (int ph = 0; ph <= 3; ph++) {
+    drawBootFrame(0, "Starting...", ph);
+    delay(arcDelays[ph]);
+  }
+  // Hold full logo so the user can appreciate it before steps begin
+  delay(600);
+
   oled.setContrast(g_settings.oledContrast);
 }
 
 void uiBootStep(const char* step) {
-  bootSplash(step);
+  g_bootStep++;
+  drawBootFrame(g_bootStep, step, 3);   // always full logo during steps
+  delay(200);                           // minimum visibility per step
 }
 
 void uiEnterBootPage(){
@@ -235,8 +310,12 @@ void uiDrawContacts(){
   menuDivider();
 
   if (cc == 0){
-    oled.drawString(0, SB_H+14, "(none — E to search)");
-    oled.drawString(0, SB_H+28, "X=Config");
+    int es = emptyContactsSelGet();
+    const char* opts[2] = { "Pair via LoRa", "Pair via BT" };
+    for (int i = 0; i < 2; i++){
+      String line = String((i == es) ? ">" : " ") + opts[i];
+      oled.drawString(0, SB_H + 14 + i*12, line);
+    }
   } else {
     int first = 0;
     if (sel >= 3) first = sel - 2;
@@ -483,16 +562,17 @@ void uiDrawConfig(){
   int sel = configSelGet();
 
   const char* items[] = {
+    "Pair via LoRa",
+    "Pair via BT",
     "Notifications",
     "Power",
     "Security",
     "Messages",
     "Broadcast",
     "Contacts",
-    "System",
-    "Pair via BT"
+    "System"
   };
-  const int N = 8;
+  const int N = 9;
   int first = 0;
   if (sel >= 3) first = sel - 2;
 

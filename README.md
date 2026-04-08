@@ -303,10 +303,18 @@ Tap the same digit repeatedly within 800 ms to cycle through its letters. Wait 8
 Boot → PAGE_NAME (first run only)
          ↓ OK (save name)
        PAGE_CONTACTS                   ← main hub
-         ↓ OK (open chat)        → PAGE_CHAT
-         ↓ OK (no contacts)      → PAGE_SEARCH → invite peer → PAGE_INVITE_CODE
-         ↓ ← (back)              → PAGE_CONFIG
+         │
+         ├── (no contacts) ▲/▼ select  → "Pair via LoRa" or "Pair via BT"
+         │                 OK (LoRa)   → PAGE_SEARCH → invite peer → PAGE_INVITE_CODE
+         │                 OK (BT)     → PAGE_BT_PAIR
+         │
+         ├── (has contacts) OK          → PAGE_CHAT
+         │                  * short     → PAGE_CONTACT_DETAIL (Chat / Delete)
+         │
+         └── ← (back)                  → PAGE_CONFIG
                 │
+                ├── Pair via LoRa  → PAGE_SEARCH → invite peer → PAGE_INVITE_CODE
+                ├── Pair via BT    → PAGE_BT_PAIR
                 ├── Notifications  → PAGE_SETTINGS_NOTIFY
                 ├── Power          → PAGE_SETTINGS_POWER
                 ├── Security       → PAGE_SETTINGS_SECURITY
@@ -314,9 +322,8 @@ Boot → PAGE_NAME (first run only)
                 ├── Messages       → PAGE_SETTINGS_MESSAGES
                 ├── Broadcast      → PAGE_BROADCAST (chat UI)
                 ├── Contacts       → PAGE_CONTACTS
-                ├── System         → PAGE_SETTINGS_SYSTEM
-                │                       └── Factory Reset → PAGE_CONFIRM_RESET
-                └── Pair via BT    → PAGE_BT_PAIR
+                └── System         → PAGE_SETTINGS_SYSTEM
+                                        └── Factory Reset → PAGE_CONFIRM_RESET
 
 Special:
   * held 2s (on contacts/chat)  → lock immediately (if PIN set)
@@ -354,8 +361,10 @@ Both devices communicate over the LoRa radio to establish the contact. One devic
 **How to use:**
 
 1. Both devices go to the **Contacts** screen.
-2. The **inviter** presses **OK** → opens **Search** → device scans for nearby LoRa peers.
-3. The inviter selects the peer from the list and presses **OK**. A **6-digit code** appears on the inviter's screen.
+2. The **inviter** opens Search in one of two ways:
+   - If the contact list is **empty**: use **▲/▼** to highlight **Pair via LoRa**, then press **OK**.
+   - If contacts already exist: press **←** → **Config** → **Pair via LoRa** → **OK**.
+3. The device scans for nearby LoRa peers. The inviter selects the peer and presses **OK**. A **6-digit code** appears on the inviter's screen.
 4. The inviter communicates this code out-of-band to the invitee (voice call, etc.).
 5. The **invitee** automatically sees an invite prompt. They type the 6-digit code and press **OK**.
 6. Both devices confirm — the contact is saved on both sides with a derived shared key.
@@ -386,7 +395,9 @@ The pairing process uses BLE GATT: one device advertises as **Host** with a fres
 
 **How to use:**
 
-1. Go to **Config → Pair via BT** on both devices.
+1. Open the BT pairing screen on both devices in one of two ways:
+   - If the contact list is **empty**: use **▲/▼** to highlight **Pair via BT**, then press **OK**.
+   - If contacts already exist: press **←** → **Config** → **Pair via BT** → **OK**.
 2. On the **first device**, select **Host (share key)** → press **OK**. The device advertises via BLE for up to 60 seconds.
 3. On the **second device**, select **Join (scan)** → press **OK**. The device scans for the host.
 4. Once found, the connection and key exchange happen automatically.
@@ -471,18 +482,19 @@ If the device has no contacts, SOS broadcasts an unencrypted discovery-style pac
 
 ### Settings
 
-Access via **Contacts → ← → Config**:
+Access via **Contacts → ← → Config** (or directly from the empty contacts screen):
 
-| Menu item | What it configures |
-|-----------|-------------------|
-| **Notifications** | Toggle LED / Buzz / Vibration / Wake screen on incoming messages |
-| **Power** | Screen timeout, sleep poll interval, OLED brightness |
-| **Security** | Enable/disable lock, lock timeout, set/change PIN |
-| **Messages** | Default message priority, chat history retention days |
-| **Broadcast** | Send one message to all contacts at once |
-| **Contacts** | Return to contacts list |
-| **System** | View device ID, LoRa frequency, factory reset |
-| **Pair via BT** | Pair a new contact via Bluetooth proximity |
+| # | Menu item | What it configures |
+|---|-----------|-------------------|
+| 0 | **Pair via LoRa** | Open LoRa discovery/invite to pair a new contact over radio |
+| 1 | **Pair via BT** | Pair a new contact via Bluetooth proximity (≤10 m) |
+| 2 | **Notifications** | Toggle LED / Buzz / Vibration / Wake screen on incoming messages |
+| 3 | **Power** | Screen timeout, sleep poll interval, OLED brightness |
+| 4 | **Security** | Enable/disable lock, lock timeout, set/change PIN |
+| 5 | **Messages** | Default message priority, chat history retention days |
+| 6 | **Broadcast** | Send one message to all contacts at once |
+| 7 | **Contacts** | Return to contacts list |
+| 8 | **System** | View device ID, LoRa frequency, factory reset |
 
 ---
 

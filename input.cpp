@@ -56,7 +56,7 @@ void storageContactsSelSet(int v){
   contactsSel = (v % cc + cc) % cc;
 }
 
-// ===== Config menu (6 items) =====
+// ===== Config menu (9 items) =====
 static int configSel = 0;
 int  configSelGet(){ return configSel; }
 void configSelSet(int v){ configSel = (v % CONFIG_ITEMS + CONFIG_ITEMS) % CONFIG_ITEMS; }
@@ -82,6 +82,11 @@ void searchSelSet(int v){
 static int btpairSel = 0;
 int  btpairSelGet()          { return btpairSel; }
 void btpairSelSet(int v)     { btpairSel = (v % 2 + 2) % 2; }
+
+// ===== Empty contacts page selection (0=Pair via LoRa, 1=Pair via BT) =====
+static int emptyContactsSel = 0;
+int  emptyContactsSelGet()          { return emptyContactsSel; }
+void emptyContactsSelSet(int v)     { emptyContactsSel = (v % 2 + 2) % 2; }
 
 // ===== Settings sub-page selections =====
 static int notifySel  = 0;
@@ -345,13 +350,29 @@ void inputPoll(){
 
   // ===== PAGE_CONTACTS =====
   if (page == PAGE_CONTACTS){
+    if (storageContactCount() == 0){
+      // Empty list: U/D navigate between pairing options
+      if (k == 'U'){ emptyContactsSelSet(emptyContactsSel - 1); uiDrawContacts(); return; }
+      if (k == 'D'){ emptyContactsSelSet(emptyContactsSel + 1); uiDrawContacts(); return; }
+      if (k == 'E'){
+        if (emptyContactsSel == 0){
+          protocolNearbyClear();
+          page = PAGE_SEARCH; uiDrawSearch(); protocolSendDiscReq();
+        } else {
+          btpairReset();
+          btpairSel = 0;
+          page = PAGE_BT_PAIR;
+          uiDrawBTPair();
+        }
+        return;
+      }
+      if (k == 'X'){ configSelSet(0); page = PAGE_CONFIG; uiDrawConfig(); return; }
+      return;
+    }
     if (k == 'U'){ storageContactsSelSet(contactsSel-1); uiDrawContacts(); return; }
     if (k == 'D'){ storageContactsSelSet(contactsSel+1); uiDrawContacts(); return; }
     if (k == 'E'){
-      if (storageContactCount() == 0){
-        protocolNearbyClear();
-        page = PAGE_SEARCH; uiDrawSearch(); protocolSendDiscReq();
-      } else {
+      {
         // Enter chat directly
         int idx = storageContactsSel();
         const Contact& c = storageContactAt(idx);
@@ -417,24 +438,28 @@ void inputPoll(){
     if (k == 'X'){ page = PAGE_CONTACTS; uiDrawContacts(); return; }
     if (k == 'E'){
       int sel = configSelGet();
-      if (sel == 0){ notifySel = 0; page = PAGE_SETTINGS_NOTIFY;   uiDrawSettingsNotify(); }
-      else if (sel == 1){ powerSel = 0; page = PAGE_SETTINGS_POWER;    uiDrawSettingsPower(); }
-      else if (sel == 2){ secSel = 0;   page = PAGE_SETTINGS_SECURITY; uiDrawSettingsSecurity(); }
-      else if (sel == 3){ msgSel = 0;   page = PAGE_SETTINGS_MESSAGES; uiDrawSettingsMessages(); }
-      else if (sel == 4){
-        storageComposeMut() = "";
-        page = PAGE_BROADCAST;
-        uiForceBlinkRestart();
-        uiDrawChat();
+      if (sel == 0){
+        protocolNearbyClear();
+        page = PAGE_SEARCH; uiDrawSearch(); protocolSendDiscReq();
       }
-      else if (sel == 5){ page = PAGE_CONTACTS; uiDrawContacts(); }
-      else if (sel == 6){ sysSel = 0;   page = PAGE_SETTINGS_SYSTEM;  uiDrawSettingsSystem(); }
-      else if (sel == 7){
+      else if (sel == 1){
         btpairReset();
         btpairSel = 0;
         page = PAGE_BT_PAIR;
         uiDrawBTPair();
       }
+      else if (sel == 2){ notifySel = 0; page = PAGE_SETTINGS_NOTIFY;   uiDrawSettingsNotify(); }
+      else if (sel == 3){ powerSel = 0; page = PAGE_SETTINGS_POWER;    uiDrawSettingsPower(); }
+      else if (sel == 4){ secSel = 0;   page = PAGE_SETTINGS_SECURITY; uiDrawSettingsSecurity(); }
+      else if (sel == 5){ msgSel = 0;   page = PAGE_SETTINGS_MESSAGES; uiDrawSettingsMessages(); }
+      else if (sel == 6){
+        storageComposeMut() = "";
+        page = PAGE_BROADCAST;
+        uiForceBlinkRestart();
+        uiDrawChat();
+      }
+      else if (sel == 7){ page = PAGE_CONTACTS; uiDrawContacts(); }
+      else if (sel == 8){ sysSel = 0;   page = PAGE_SETTINGS_SYSTEM;  uiDrawSettingsSystem(); }
       return;
     }
     return;

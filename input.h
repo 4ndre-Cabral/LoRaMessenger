@@ -15,8 +15,8 @@ bool inputNumbers();
 int  storageContactsSel();
 void storageContactsSelSet(int v);
 
-// Config menu (8 items)
-static constexpr int CONFIG_ITEMS = 8;
+// Config menu (9 items)
+static constexpr int CONFIG_ITEMS = 9;
 int  configSelGet();
 void configSelSet(int v);
 
@@ -48,6 +48,10 @@ void contactDetailSelSet(int v);
 // BT Pair page selection (0=Host, 1=Join)
 int  btpairSelGet();
 void btpairSelSet(int v);
+
+// Empty contacts page selection (0=Pair via LoRa, 1=Pair via BT)
+int  emptyContactsSelGet();
+void emptyContactsSelSet(int v);
 
 // Lock PIN input buffer (separate from compose)
 const String& inputLockPin();
