@@ -86,3 +86,13 @@ void storageClearName(){
   p.end();
   deviceName = "";
 }
+
+bool storageDeleteContact(uint8_t id){
+  int idx = storageFindContact(id);
+  if (idx < 0) return false;
+  // Shift remaining contacts down
+  for (int i = idx; i < contactCount-1; i++) contacts[i] = contacts[i+1];
+  contactCount--;
+  storageSaveContacts();
+  return true;
+}

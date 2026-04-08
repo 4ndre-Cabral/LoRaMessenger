@@ -1,9 +1,12 @@
-
 #include "ui.h"
 #include "bitmaps.h"
 #include "storage.h"
 #include "input.h"
 #include "protocol.h"
+#include "settings.h"
+#include "power.h"
+#include "lock.h"
+#include "btpair.h"
 
 #ifdef WIRELESS_STICK_V3
 SSD1306Wire oled(0x3c, 500000, SDA_OLED, SCL_OLED, GEOMETRY_64_32, RST_OLED);
@@ -13,34 +16,40 @@ SSD1306Wire oled(0x3c, 500000, SDA_OLED, SCL_OLED, GEOMETRY_128_64, RST_OLED);
 
 Page page = PAGE_CONTACTS;
 
-// Layout constants for chat
-static const int SEP_Y       = 50;
-static const int CHAT_BOTTOM = SEP_Y - 12;
+// ===== Layout constants =====
+static const int SB_H        = 13;   // status bar height (12px + 1px separator)
+static const int SEP_Y       = 51;   // separator between chat and compose
+static const int CHAT_BOTTOM = 39;   // topmost y for last message (text y=39..48, sep at y=51)
 
-// Blink state
-static uint32_t lastBlink = 0;
-static bool blinkOn = true;
-
+// ===== Blink state =====
+static uint32_t lastBlink      = 0;
+static bool     blinkOn        = true;
 static uint32_t lastForcedBlink = 0;
 
 // ===== Invite state (definitions) =====
-uint8_t  inviteeId = 0;
-uint32_t inviteCode = 0;
-
-uint8_t  inviterId = 0;
-char     inviterName[21] = {0};
+uint8_t  inviteeId           = 0;
+uint32_t inviteCode          = 0;
+uint8_t  inviterId           = 0;
+char     inviterName[21]     = {0};
 uint32_t inviterCodeExpected = 0;
+uint8_t  inviterNonce8[8]    = {0};  // nonce received in INV_REQ
 
 extern uint32_t dbg_rxCount;
 extern int8_t   dbg_lastRssi;
 extern uint8_t  dbg_lastType, dbg_lastFrom, dbg_lastTo, dbg_lastWhy;
 
-extern Page page;
-extern SSD1306Wire oled;
-extern bool blinkOn;     // use the same blinkOn you already have in ui.cpp
-
+// ===== Hardware init =====
 void VextON()  { pinMode(Vext, OUTPUT); digitalWrite(Vext, LOW);  }
 void VextOFF() { pinMode(Vext, OUTPUT); digitalWrite(Vext, HIGH); }
+
+static void bootSplash(const char* step) {
+  oled.clear();
+  oled.setFont(ArialMT_Plain_10);
+  oled.setTextAlignment(TEXT_ALIGN_LEFT);
+  oled.drawString(0, 0,  "LoRaMessenger v2");
+  oled.drawString(0, 14, step);
+  oled.display();
+}
 
 void appInitHardware(){
   VextON(); delay(120);
@@ -48,266 +57,349 @@ void appInitHardware(){
   oled.init();
   oled.displayOn();
   oled.setContrast(255);
+  bootSplash("Starting...");
+  oled.setContrast(g_settings.oledContrast);
+}
 
-  // Smoke test: draw something now so you know it’s alive
-  oled.clear();
-  oled.drawString(0, 0, "OLED up!");
-  oled.drawRect(0, 12, 128, 16);
-  oled.display();
+void uiBootStep(const char* step) {
+  bootSplash(step);
 }
 
 void uiEnterBootPage(){
-  if (storageDeviceName().length() == 0) {
+  if (storageDeviceName().length() == 0){
     page = PAGE_NAME;
-    storageComposeMut() = ""; // start empty
+    storageComposeMut() = "";
     uiDrawNameEntry();
+  } else if (lockIsLocked()){
+    page = PAGE_LOCK;
+    uiDrawLock();
   } else {
     page = PAGE_CONTACTS;
     uiDrawContacts();
   }
 }
 
+// ===== UI tick =====
 void uiTick(){
   const uint32_t PERIOD = 500;
   uint32_t now = millis();
-  if ((now - lastBlink) >= PERIOD) {
+  if ((now - lastBlink) >= PERIOD){
     lastBlink = now;
-    blinkOn = !blinkOn;
-
-    // TEMP: show the blinker bit always, to prove the timer runs
-    // uiDebugBlinkOverlay();
-
-    if (page == PAGE_CHAT || page == PAGE_BROADCAST) {
-      // only repaint the bottom band where the caret lives
+    blinkOn   = !blinkOn;
+    if (page == PAGE_CHAT || page == PAGE_BROADCAST){
       uiRedrawComposeBand(true);
-    } else if (page == PAGE_NAME) {
+    } else if (page == PAGE_NAME){
       uiDrawNameEntry();
-    } else if (page == PAGE_INVITE_PROMPT) {
+    } else if (page == PAGE_INVITE_PROMPT){
       uiDrawInvitePrompt();
+    } else if (page == PAGE_LOCK){
+      uiDrawLock();
+    } else if (page == PAGE_PIN_SETUP || page == PAGE_PIN_CHANGE){
+      uiDrawPinSetup();
     }
   }
 }
 
-// ====== Small text helpers ======
+// ====== Text helpers ======
 static void flush(){ oled.display(); }
 
-// Measure-fitted compose tail
 static String fitTail(const String& s, int maxPixels, int &w){
   String t = s;
-  while (oled.getStringWidth(t) > maxPixels && t.length()>0) t.remove(0,1);
+  while (oled.getStringWidth(t) > maxPixels && t.length() > 0) t.remove(0,1);
   w = oled.getStringWidth(t);
   return t;
 }
 
-// Simple word wrap (first-line prefix support disabled here for brevity)
-static void wrapLines(const String& text, int maxWidth, std::vector<String> &out){
+static void wrapLines(const String& text, int maxWidth, std::vector<String>& out){
   out.clear();
-  int n = text.length(); String line=""; int i=0;
+  int n = text.length(); String line = ""; int i = 0;
   auto fits = [&](const String& s){ return oled.getStringWidth(s) <= maxWidth; };
-  while (i<=n){
+  while (i <= n){
     int sp = text.indexOf(' ', i);
-    String word; bool last=false;
-    if (sp<0){ word=text.substring(i); last=true; } else { word=text.substring(i, sp+1); }
+    String word; bool last = false;
+    if (sp < 0){ word = text.substring(i); last = true; }
+    else { word = text.substring(i, sp+1); }
     String cand = line + word;
-    if (fits(cand)) { line = cand; }
+    if (fits(cand)){ line = cand; }
     else {
-      if (line.length()>0) out.push_back(line);
-      // hard split long word
+      if (line.length() > 0) out.push_back(line);
       String wleft = word;
-      while (!fits(wleft) && wleft.length()>0){
-        int lo=1, hi=wleft.length();
-        while (lo<hi){
-          int mid=(lo+hi)/2;
-          String part=wleft.substring(0,mid);
-          if (oled.getStringWidth(part)<=maxWidth) lo=mid+1; else hi=mid;
+      while (!fits(wleft) && wleft.length() > 0){
+        int lo = 1, hi = wleft.length();
+        while (lo < hi){
+          int mid = (lo+hi)/2;
+          String part = wleft.substring(0, mid);
+          if (oled.getStringWidth(part) <= maxWidth) lo = mid+1; else hi = mid;
         }
         int take = max(1, lo-1);
-        out.push_back(wleft.substring(0,take));
-        wleft.remove(0,take);
+        out.push_back(wleft.substring(0, take));
+        wleft.remove(0, take);
       }
       line = wleft;
     }
     if (last) break;
     i = sp + 1;
   }
-  if (line.length()>0) out.push_back(line);
+  if (line.length() > 0) out.push_back(line);
 }
 
-// ====== Pages ======
+static void menuDivider(){
+  for (int x = 0; x < 128; x += 3) oled.setPixel(x, SB_H+13);
+}
+
+// ====== Status Bar (12px top) ======
+void uiDrawStatusBar(){
+  oled.setFont(ArialMT_Plain_10);
+  oled.setTextAlignment(TEXT_ALIGN_LEFT);
+
+  // Lock indicator
+  int x = 0;
+  if (lockIsLocked()){
+    oled.drawString(x, 0, "L ");
+    x += oled.getStringWidth("L ");
+  }
+
+  // Device name (truncated to 8 chars)
+  String nm = storageDeviceName();
+  if (nm.length() > 8) nm = nm.substring(0, 8);
+  oled.drawString(x, 0, nm);
+
+  // Right side: RSSI + battery + charging
+  oled.setTextAlignment(TEXT_ALIGN_RIGHT);
+  String right = "";
+  if (powerIsCharging()) right += "~";
+  right += String(powerBatteryPct()) + "%";
+  right += " " + String(dbg_lastRssi) + "dBm";
+  oled.drawString(127, 0, right);
+
+  // Separator line
+  oled.setTextAlignment(TEXT_ALIGN_LEFT);
+  oled.drawLine(0, 12, 127, 12);
+}
+
+// Relative timestamp helper: returns "Xm" or "Xs" ago
+static String relTime(uint32_t ts){
+  uint32_t elapsed = (millis() - ts) / 1000;
+  if (elapsed < 60)  return String(elapsed) + "s";
+  if (elapsed < 3600) return String(elapsed/60) + "m";
+  return String(elapsed/3600) + "h";
+}
+
+// ====== PAGE_NAME ======
 void uiDrawNameEntry(){
   oled.clear();
-  oled.setTextAlignment(TEXT_ALIGN_LEFT);
   oled.setFont(ArialMT_Plain_10);
+  oled.setTextAlignment(TEXT_ALIGN_LEFT);
 
-  // Header with remaining counter (remaining/total)
-  const String &typed = storageCompose();   // current name buffer
-  int remaining = max(0, DEVICE_NAME_MAX_LEN - (int)typed.length());
-  int used = DEVICE_NAME_MAX_LEN - remaining;
+  const String& typed = storageCompose();
+  int used      = (int)typed.length();
+  int remaining = max(0, DEVICE_NAME_MAX_LEN - used);
 
-  String header = "Set device name  " + String(used) + "/" + String(DEVICE_NAME_MAX_LEN);
-  oled.drawString(0, 0, header);
+  oled.drawString(0, 0, "Device name " + String(used) + "/" + String(DEVICE_NAME_MAX_LEN));
 
-  // Show mode badges (right side): A for Capital Case, # for Numbers
   String badges = "";
   if (inputUppercase()) badges += "A";
   if (inputNumbers())   badges += "#";
-  if (badges.length() > 0) {
+  if (badges.length() > 0){
     oled.setTextAlignment(TEXT_ALIGN_RIGHT);
     oled.drawString(127, 0, badges);
     oled.setTextAlignment(TEXT_ALIGN_LEFT);
   }
 
-  // Compose line with tail-fit + blinking caret
-  const int baseY = 16;
-  const int MAX_PX = 128;   // full width for name input
-
+  const int baseY = 18;
   int textW = 0;
-  String toShow = fitTail(typed, MAX_PX, textW);   // your existing tail fitter
+  String toShow = fitTail(typed, 128, textW);
   oled.drawString(0, baseY, toShow);
 
-  // robust blinking caret (block under baseline)
-  if (blinkOn) {
-    int caretX = min(textW, MAX_PX - 2);
-    oled.fillRect(caretX, baseY + 8, 6, 2);
+  if (blinkOn){
+    int caretX = min(textW, 122);
+    oled.fillRect(caretX, baseY+8, 6, 2);
   }
 
-  oled.drawString(0, 40, "Enter=Save    ESC=Delete");
-  oled.display();
+  oled.drawString(0, 42, "E=Save  X=Delete  *=Case  #=Num");
+  flush();
 }
 
-
+// ====== PAGE_CONTACTS ======
 void uiDrawContacts(){
   oled.clear();
-  oled.drawString(0,0,"Contacts");
-  int cc = storageContactCount();
-  if (cc==0){
-    oled.drawString(0,16,"(none)");
-    oled.drawString(0,28,"Enter: Search nearby");
-    oled.drawString(0,40,"ESC: Broadcast");
+  uiDrawStatusBar();
+
+  oled.setFont(ArialMT_Plain_10);
+  oled.setTextAlignment(TEXT_ALIGN_LEFT);
+
+  int cc  = storageContactCount();
+  int sel = storageContactsSel();
+
+  oled.drawString(0, SB_H, "Contacts " + String(cc) + "/10");
+  menuDivider();
+
+  if (cc == 0){
+    oled.drawString(0, SB_H+14, "(none — E to search)");
+    oled.drawString(0, SB_H+28, "X=Config");
   } else {
-    int sel = storageContactsSel();
-    for (int i=0;i<cc && i<5;i++){
-      int y = 12 + i*10;
-      const Contact& c = storageContactAt(i);
-      String line = String((i==sel)?"> ":"  ") + String(c.name) + " (" + String(c.id) + ")";
-      oled.drawString(0,y,line);
+    int first = 0;
+    if (sel >= 3) first = sel - 2;
+    for (int i = 0; i < 3; i++){
+      int idx = first + i;
+      if (idx >= cc) break;
+      int y = SB_H + 14 + i*12;
+      const Contact& c = storageContactAt(idx);
+      bool online = protocolIsOnline(c.id);
+      int  unread = protocolUnreadCount(c.id);
+
+      String prefix = (idx == sel) ? ">" : " ";
+      String status = online ? "*" : " ";
+      String badge  = (unread > 0) ? "(" + String(unread) + ")" : "";
+      String rssi   = online ? " " + String(protocolContactRssi(c.id)) : "";
+
+      String line = prefix + status + String(c.name) + badge + rssi;
+      oled.drawString(0, y, line);
     }
-    oled.drawString(0,58,"Enter: Chat   ESC: Broadcast");
   }
   flush();
 }
 
+// ====== PAGE_SEARCH ======
 void uiDrawSearch(){
   oled.clear();
+  uiDrawStatusBar();
+
   oled.setFont(ArialMT_Plain_10);
   oled.setTextAlignment(TEXT_ALIGN_LEFT);
-  oled.drawString(0,0,"Searching nearby...");
+  oled.drawString(0, SB_H, "Searching...");
 
-  extern DiscEntry g_disc[];
-  extern int g_discCount;
-  extern int searchSelGet();
-  int sel = searchSelGet();
+  int sel   = searchSelGet();
+  int first = (sel >= 3) ? sel - 2 : 0;
 
-  // Simple scroll if more than 4 rows
-  int first = 0;
-  if (sel >= 4) first = sel - 3;
-
-  for (int row=0; row<4; ++row){
+  for (int row = 0; row < 3; ++row){
     int i = first + row;
     if (i >= g_discCount) break;
     String line = String(g_disc[i].id) + ": " + String(g_disc[i].name) +
-                  " (" + String(g_disc[i].rssi) + "dBm)";
-    if (i == sel) line = "> " + line; else line = "  " + line;
-    oled.drawString(0, 14 + row*12, line);
+                  "(" + String(g_disc[i].rssi) + ")";
+    if (i == sel) line = ">" + line; else line = " " + line;
+    oled.drawString(0, SB_H + 12 + row*13, line);
   }
-
-  oled.drawString(0, 56, "U/D=Select  Enter=Invite  X=Back");
-  oled.display();
+  flush();
 }
 
+// ====== PAGE_INVITE_CODE ======
 void uiDrawInviteCode(){
   oled.clear();
+  uiDrawStatusBar();
+
   oled.setFont(ArialMT_Plain_10);
-  oled.drawString(0,0,"Share this code with peer:");
-  char buf[16]; snprintf(buf,sizeof(buf), "%06u", (unsigned)inviteCode);
+  oled.drawString(0, SB_H, "Share code with peer:");
+  char buf[16]; snprintf(buf, sizeof(buf), "%06u", (unsigned)inviteCode);
   oled.setFont(ArialMT_Plain_16);
-  oled.drawString(0,18, buf);
+  oled.drawString(0, SB_H+12, buf);
   oled.setFont(ArialMT_Plain_10);
-  oled.drawString(0,40, String("To ID: ") + String(inviteeId));
-  oled.drawString(0,56,"Waiting for accept...  X=Back");
-  oled.display();
+  oled.drawString(0, SB_H+30, "To ID: " + String(inviteeId));
+  oled.drawString(0, SB_H+42, "X=Cancel");
+  flush();
 }
 
 void uiShowInviteCode(uint8_t toId, uint32_t code6){
-  inviteeId = toId;
+  inviteeId  = toId;
   inviteCode = code6;
 }
 
-
+// ====== PAGE_INVITE_PROMPT ======
 void uiDrawInvitePrompt(){
   oled.clear();
-  oled.setFont(ArialMT_Plain_10);
-  oled.drawString(0,0,"Invite received");
-  oled.drawString(0,12, String("From: ") + String(inviterName) + " (" + String(inviterId) + ")");
-  oled.drawString(0,24,"Enter 6-digit code:");
+  uiDrawStatusBar();
 
-  const String &typed = storageCompose();
+  oled.setFont(ArialMT_Plain_10);
+  oled.drawString(0, SB_H,    "Invite from:");
+  oled.drawString(0, SB_H+10, String(inviterName) + " (" + String(inviterId) + ")");
+  oled.drawString(0, SB_H+22, "Enter 6-digit code:");
+
+  const String& typed = storageCompose();
   oled.setFont(ArialMT_Plain_16);
-  oled.drawString(0,38, typed);
-  if (blinkOn) {
+  oled.drawString(0, SB_H+33, typed);
+  if (blinkOn){
     int w = oled.getStringWidth(typed);
-    oled.fillRect(w, 38+10, 6, 2); // block caret
+    oled.fillRect(w, SB_H+43, 6, 2);
   }
   oled.setFont(ArialMT_Plain_10);
-  oled.drawString(0,56,"Enter=OK  X=Back");
-  oled.display();
+  flush();
+}
+
+void uiShowInvitePrompt(uint8_t fromId, const char* fromNm, uint32_t code6){
+  inviterId           = fromId;
+  strlcpy(inviterName, fromNm ? fromNm : "", sizeof(inviterName));
+  inviterCodeExpected = code6;
+  storageComposeMut() = "";
 }
 
 void inviteReset(){
-  inviteeId = 0;
-  inviteCode = 0;
-
-  inviterId = 0;
-  inviterName[0] = 0;
+  inviteeId           = 0;
+  inviteCode          = 0;
+  inviterId           = 0;
+  inviterName[0]      = 0;
   inviterCodeExpected = 0;
-
-  storageComposeMut() = "";   // clear any typed code
+  memset(inviterNonce8, 0, 8);
+  storageComposeMut() = "";
 }
 
 bool inviteInProgress(){
   return (inviteeId != 0) || (inviterId != 0);
 }
 
-void uiShowInvitePrompt(uint8_t fromId, const char* fromNm, uint32_t code6){
-  inviterId = fromId;
-  strlcpy(inviterName, (fromNm?fromNm:""), sizeof(inviterName));
-  inviterCodeExpected = code6;
-  storageComposeMut() = "";   // clear 6-digit input buffer
-}
-
+// ====== PAGE_CHAT ======
 void uiDrawChat(){
   oled.clear();
+
+  // Custom status bar for chat: show peer name instead of device name
+  oled.setFont(ArialMT_Plain_10);
+  oled.setTextAlignment(TEXT_ALIGN_LEFT);
+  uint8_t currentPeerId = protocolCurrentPeer();
+  int     peerIdx  = storageFindContact(currentPeerId);
+  String  peerName = (peerIdx >= 0) ? String(storageContactAt(peerIdx).name) : String(currentPeerId);
+  bool    peerOnline = protocolIsOnline(currentPeerId);
+  String  peerLabel  = (peerOnline ? ">" : " ") + peerName;
+  oled.drawString(0, 0, peerLabel);
+
+  oled.setTextAlignment(TEXT_ALIGN_RIGHT);
+  String right = "";
+  if (powerIsCharging()) right += "~";
+  right += String(powerBatteryPct()) + "%";
+  right += " " + String(protocolContactRssi(currentPeerId)) + "dBm";
+  oled.drawString(127, 0, right);
+  oled.drawLine(0, 12, 127, 12);
+
+  oled.setTextAlignment(TEXT_ALIGN_LEFT);
   oled.setColor(WHITE);
   oled.setFont(ArialMT_Plain_10);
-  int y = CHAT_BOTTOM;
-  int rowSkip = protocolScrollOffset();
 
-  // render messages from newest to oldest
-  for (int idx = protocolChatCount()-1; idx>=0 && y >= 0; --idx){
+  int y        = CHAT_BOTTOM;
+  int rowSkip  = protocolScrollOffset();
+
+  for (int idx = protocolChatCount()-1; idx >= 0 && y >= SB_H; --idx){
     ChatMsg m; protocolGetChat(idx, m);
     bool mine = (m.from == protocolDeviceId());
-    String tag="";
+
+    String tag = "";
     if (mine){
-      if (m.status==ST_FAILED) tag=" /x";
-      else if (m.status==ST_DELIVERED) tag=" //";
+      if (m.status == ST_FAILED)         tag = " /x";
+      else if (m.status == ST_DELIVERED) tag = " //";
+      else if (m.status == ST_SENT)      tag = " /";
     }
+    if (m.priority == PRIORITY_HIGH) tag += "[!]";
+    if (m.priority == PRIORITY_SOS)  tag += "[S]";
+
+    // Relative timestamp suffix
+    String ts = " " + relTime(m.timestamp);
+
     std::vector<String> lines;
-    wrapLines(m.text + tag, 128, lines);
+    wrapLines(m.text + tag + ts, 120, lines);
     int rows = (int)lines.size();
-    if (rowSkip >= rows) { rowSkip -= rows; continue; }
+
+    if (rowSkip >= rows){ rowSkip -= rows; continue; }
     int startLine = rows - 1 - rowSkip;
     rowSkip = 0;
-    for (int li=startLine; li>=0 && y>=0; --li){
+
+    for (int li = startLine; li >= 0 && y >= SB_H; --li){
       int w = oled.getStringWidth(lines[li]);
       int x = mine ? (128 - w) : 0;
       oled.drawString(x, y, lines[li]);
@@ -315,203 +407,486 @@ void uiDrawChat(){
     }
   }
 
-  // separator
+  // Separator
   oled.drawLine(0, SEP_Y, 127, SEP_Y);
 
-  // show 'v' blinking if scrolled up
   if (protocolScrollOffset() > 0 && blinkOn){
     oled.setTextAlignment(TEXT_ALIGN_CENTER);
-    oled.drawString(64, SEP_Y - 10, "v");
+    oled.drawString(64, SEP_Y-10, "v");
     oled.setTextAlignment(TEXT_ALIGN_LEFT);
   }
-
-  // // compose line with caret + send icon
-  // oled.setTextAlignment(TEXT_ALIGN_LEFT);
-  // oled.setFont(ArialMT_Plain_10);
-
-  // const int baseY = SEP_Y + 2;
-  // const int SEND_ICON_RESERVE = 24;
-  // const int COMPOSE_MAX_PX = 128 - SEND_ICON_RESERVE;
-
-  // int textW = 0;
-  // String toShow = fitTail(storageCompose(), COMPOSE_MAX_PX, textW);
-
-  // // draw text
-  // oled.drawString(0, baseY, toShow);
-
-  // // robust blinking caret as a small block *below* the text
-  // int caretX = textW;
-  // if (caretX > COMPOSE_MAX_PX - 2) caretX = COMPOSE_MAX_PX - 2;  // clamp before send icon
-  // // For ArialMT_Plain_10, baseline thickness ~2px at y+8..9 looks good
-  // if (blinkOn) {
-  //   oled.fillRect(caretX, baseY + 8, 6, 2);   // width 6px, height 2px
-  // } else {
-  //   // optional hollow caret when "off", keeps visual stability
-  //   oled.drawRect(caretX, baseY + 8, 6, 2);
-  // }
-  // // send icon
-  // oled.drawLine(112, baseY,   122, baseY+5);
-  // oled.drawLine(122, baseY+5, 112, baseY+10);
-  // oled.drawLine(112, baseY+10,112, baseY);
-
-  // // tiny indicators
-  // String mode="";
-  // if (inputUppercase()) mode+="A";
-  // if (inputNumbers())   mode+="#";
-  // if (mode.length()>0){
-  //   oled.setTextAlignment(TEXT_ALIGN_RIGHT);
-  //   oled.drawString(110, SEP_Y+2, mode);
-  //   oled.setTextAlignment(TEXT_ALIGN_LEFT);
-  // }
-
-  // flush();
 
   uiRedrawComposeBand(false);
   flush();
 }
 
-// Repaint only the compose band (bottom area) so the caret can blink
-void uiRedrawComposeBand(bool push = true) {
-  const int SEP_Y = 50;
-  const int baseY = SEP_Y + 2;
+// Compose band (bottom of chat / broadcast)
+void uiRedrawComposeBand(bool push){
+  const int baseY           = SEP_Y + 2;
   const int SEND_ICON_RESERVE = 24;
-  const int COMPOSE_MAX_PX    = 128 - SEND_ICON_RESERVE;
+  const int COMPOSE_MAX_PX  = 128 - SEND_ICON_RESERVE;
 
-  // 1) CLEAR band to BLACK
   oled.setColor(BLACK);
-  oled.fillRect(0, SEP_Y + 1, 128, 64 - (SEP_Y + 1));
-
-  // 2) Draw all UI in WHITE
+  oled.fillRect(0, SEP_Y+1, 128, 64-(SEP_Y+1));
   oled.setColor(WHITE);
-
-  // separator
   oled.drawLine(0, SEP_Y, 127, SEP_Y);
 
-  // compose text (tail fit)
   oled.setTextAlignment(TEXT_ALIGN_LEFT);
   oled.setFont(ArialMT_Plain_10);
   int textW = 0;
   String toShow = fitTail(storageCompose(), COMPOSE_MAX_PX, textW);
   oled.drawString(0, baseY, toShow);
 
-  // caret (block when on, hollow when off)
-  int caretX = textW;
-  if (caretX > COMPOSE_MAX_PX - 2) caretX = COMPOSE_MAX_PX - 2;
-  const int caretY = baseY + 8;
-  const int caretW = 6;
-  const int caretH = 2;          // a hair taller to pop more
-
-  if (blinkOn) {
-    // solid white block
+  int caretX = min(textW, COMPOSE_MAX_PX-2);
+  if (blinkOn){
     oled.setColor(WHITE);
-    oled.fillRect(caretX, caretY, caretW, caretH);
+    oled.fillRect(caretX, baseY+8, 6, 2);
   } else {
-    // solid black to "erase" the caret area (very visible blink)
     oled.setColor(BLACK);
-    oled.fillRect(caretX, caretY, caretW, caretH);
-    oled.setColor(WHITE);        // restore draw color for anything after
+    oled.fillRect(caretX, baseY+8, 6, 2);
+    oled.setColor(WHITE);
   }
 
-  // send icon
+  // Priority indicator
+  uint8_t pri = g_settings.defaultPriority;
+  if (pri == 1){ oled.drawString(0, baseY, "[!]"); }
+  if (pri == 2){ oled.drawString(0, baseY, "[S]"); }
+
+  // Send icon (triangle)
   oled.drawLine(112, baseY,   122, baseY+5);
   oled.drawLine(122, baseY+5, 112, baseY+10);
   oled.drawLine(112, baseY+10,112, baseY);
 
-  // small mode badges (A/#) just left of the send icon
-  String mode="";
+  // Mode badges
+  String mode = "";
   if (inputUppercase()) mode += "A";
   if (inputNumbers())   mode += "#";
-  if (mode.length()>0) {
+  if (mode.length() > 0){
     oled.setTextAlignment(TEXT_ALIGN_RIGHT);
     oled.drawString(110, baseY, mode);
     oled.setTextAlignment(TEXT_ALIGN_LEFT);
   }
 
-  if (push) oled.display();
+  if (push) flush();
 }
 
+// ====== PAGE_CONFIG (expanded to 6 items) ======
 void uiDrawConfig(){
   oled.clear();
-  oled.setTextAlignment(TEXT_ALIGN_LEFT);
+  uiDrawStatusBar();
+
   oled.setFont(ArialMT_Plain_10);
+  oled.setTextAlignment(TEXT_ALIGN_LEFT);
+  oled.drawString(0, SB_H, "Config");
+  menuDivider();
 
-  oled.drawString(0, 0, "Config");
-
-  extern int configSelGet();
   int sel = configSelGet();
 
-  const char* items[3] = {"Broadcast", "Contact List", "Factory reset"};
-  for (int i=0; i<3; ++i){
-    String line = String((i==sel)?"> ":"  ") + items[i];
-    oled.drawString(0, 14 + i*12, line);
-  }
+  const char* items[] = {
+    "Notifications",
+    "Power",
+    "Security",
+    "Messages",
+    "Broadcast",
+    "Contacts",
+    "System",
+    "Pair via BT"
+  };
+  const int N = 8;
+  int first = 0;
+  if (sel >= 3) first = sel - 2;
 
-  oled.drawString(0, 56, "U/D=Move  Enter=Select  ESC=Back");
-  oled.display();
+  for (int i = 0; i < 3; i++){
+    int idx = first + i;
+    if (idx >= N) break;
+    String line = String((idx == sel) ? ">" : " ") + items[idx];
+    oled.drawString(0, SB_H + 14 + i*12, line);
+  }
+  flush();
 }
 
+// ====== PAGE_CONFIRM_RESET ======
 void uiDrawConfirmReset(){
   oled.clear();
-  oled.setTextAlignment(TEXT_ALIGN_LEFT);
+  uiDrawStatusBar();
+
   oled.setFont(ArialMT_Plain_10);
+  oled.drawString(0, SB_H,    "Factory reset?");
+  oled.drawString(0, SB_H+12, "Erases name + contacts.");
 
-  oled.drawString(0, 0, "Factory reset?");
-  oled.drawString(0, 14, "This erases device name");
-  oled.drawString(0, 26, "and all contacts.");
 
-  extern int confirmSelGet();
   int sel = confirmSelGet();
-
   const char* opts[2] = {"No", "Yes"};
-  // Put choices at the bottom for a consistent look
-  for (int i=0; i<2; ++i){
-    String line = String((i==sel)?"> ":"  ") + opts[i];
-    oled.drawString(0, 46 + i*10, line);
+  for (int i = 0; i < 2; i++){
+    String line = String((i == sel) ? ">" : " ") + opts[i];
+    oled.drawString(0, SB_H+28 + i*12, line);
   }
-
-  oled.display();
+  flush();
 }
 
+// ====== PAGE_LOCK ======
+void uiDrawLock(){
+  oled.clear();
+  oled.setFont(ArialMT_Plain_10);
+
+  oled.drawString(0, 0, "=== LOCKED ===");
+  oled.drawString(0, 14, "Enter PIN:");
+
+  const String& typed = inputLockPin();
+  String stars = "";
+  for (size_t i = 0; i < typed.length(); i++) stars += "*";
+  oled.setFont(ArialMT_Plain_16);
+  oled.drawString(0, 26, stars);
+  if (blinkOn){
+    int w = oled.getStringWidth(stars);
+    oled.fillRect(w, 36, 6, 2);
+  }
+  oled.setFont(ArialMT_Plain_10);
+
+  // Lockout message
+  uint32_t lo = lockLockoutUntil();
+  if (lo > millis()){
+    uint32_t remaining = (lo - millis()) / 1000;
+    oled.drawString(0, 46, "Wait " + String(remaining) + "s...");
+  } else if (lockFailCount() > 0){
+    oled.drawString(0, 46, "Wrong PIN (" + String(lockFailCount()) + "x)");
+  }
+
+  oled.drawString(0, 55, "E=Unlock  X=Delete");
+  flush();
+}
+
+// ====== PAGE_SLEEP_STATUS ======
+void uiDrawSleepStatus(){
+  oled.clear();
+  oled.setFont(ArialMT_Plain_10);
+
+  oled.drawString(0, 0, storageDeviceName());
+
+  uint8_t pct = powerBatteryPct();
+  String  batt = String(pct) + "%";
+  if (powerIsCharging()) batt += " ~CHG";
+  oled.drawString(0, 14, "Battery: " + batt);
+
+  oled.drawString(0, 26, "RSSI: " + String(dbg_lastRssi) + " dBm");
+
+  // Count pending notifications
+  int totalUnread = 0;
+  int cc = storageContactCount();
+  for (int i = 0; i < cc; i++){
+    totalUnread += protocolUnreadCount(storageContactAt(i).id);
+  }
+  if (totalUnread > 0){
+    oled.drawString(0, 38, String(totalUnread) + " unread message(s)");
+  }
+
+  oled.drawString(0, 52, "Any key = wake / unlock");
+  flush();
+}
+
+// ====== PAGE_SOS ======
+void uiDrawSOS(){
+  oled.clear();
+  uiDrawStatusBar();
+
+  oled.setFont(ArialMT_Plain_10);
+  oled.setTextAlignment(TEXT_ALIGN_CENTER);
+
+  if (blinkOn){
+    oled.drawString(64, SB_H, "*** SOS ***");
+  } else {
+    oled.drawString(64, SB_H, "           ");
+  }
+  oled.setTextAlignment(TEXT_ALIGN_LEFT);
+
+
+
+  oled.drawString(0, SB_H+14, "Sent: " + String(g_sosSentCount));
+  oled.drawString(0, SB_H+26, "To all contacts");
+
+  // Show which contacts ACK'd
+  int cc = storageContactCount();
+  for (int i = 0; i < cc && i < 2; i++){
+    const Contact& c = storageContactAt(i);
+    bool online = protocolIsOnline(c.id);
+    oled.drawString(0, SB_H+38+i*10, String(c.name) + (online ? " OK" : " ..."));
+  }
+
+  oled.drawString(0, 55, "Hold any key 3s = Cancel");
+  flush();
+}
+
+// ====== PAGE_SETTINGS_NOTIFY ======
+void uiDrawSettingsNotify(){
+  oled.clear();
+  uiDrawStatusBar();
+
+  oled.setFont(ArialMT_Plain_10);
+  oled.drawString(0, SB_H, "Notifications");
+  menuDivider();
+
+  uint8_t mask = g_settings.notifyMask;
+  int sel = settingsNotifySelGet();
+
+  const char* items[] = {"LED", "Buzz", "Vibration", "Wake screen"};
+  bool vals[] = {
+    (bool)(mask & 0x01),
+    (bool)(mask & 0x02),
+    (bool)(mask & 0x04),
+    (bool)(mask & 0x08)
+  };
+  int first = (sel >= 3) ? sel - 2 : 0;
+  for (int i = 0; i < 3; i++){
+    int idx = first + i;
+    if (idx >= 4) break;
+    String line = String((idx == sel) ? ">" : " ");
+    line += String(vals[idx] ? "[x] " : "[ ] ");
+    line += items[idx];
+    oled.drawString(0, SB_H+14+i*13, line);
+  }
+  flush();
+}
+
+// ====== PAGE_SETTINGS_POWER ======
+void uiDrawSettingsPower(){
+  oled.clear();
+  uiDrawStatusBar();
+
+  oled.setFont(ArialMT_Plain_10);
+  oled.drawString(0, SB_H, "Power");
+  menuDivider();
+
+  int sel = settingsPowerSelGet();
+
+  // Screen timeout options: 0=never,10,30,60,300
+  String tout;
+  switch(g_settings.screenTimeoutSec){
+    case 0:   tout = "Never"; break;
+    case 10:  tout = "10s";   break;
+    case 30:  tout = "30s";   break;
+    case 60:  tout = "1min";  break;
+    case 300: tout = "5min";  break;
+    default:  tout = String(g_settings.screenTimeoutSec) + "s";
+  }
+  // Poll interval: 500, 1000, 5000
+  String poll;
+  switch(g_settings.sleepPollMs){
+    case 500:  poll = "500ms"; break;
+    case 1000: poll = "1s";    break;
+    case 5000: poll = "5s";    break;
+    default:   poll = String(g_settings.sleepPollMs) + "ms";
+  }
+  // Contrast -> brightness %
+  int bright = (g_settings.oledContrast * 100) / 255;
+
+  const char* labels[] = {"Screen timeout", "Sleep poll", "Brightness"};
+  String vals[] = {tout, poll, String(bright) + "%"};
+  for (int i = 0; i < 3; i++){
+    String line = String((i == sel) ? ">" : " ") + labels[i] + ": " + vals[i];
+    oled.drawString(0, SB_H+14+i*13, line);
+  }
+  flush();
+}
+
+// ====== PAGE_SETTINGS_SECURITY ======
+void uiDrawSettingsSecurity(){
+  oled.clear();
+  uiDrawStatusBar();
+
+  oled.setFont(ArialMT_Plain_10);
+  oled.drawString(0, SB_H, "Security");
+  menuDivider();
+
+  int sel = settingsSecSelGet();
+
+  String lock_str  = g_settings.lockEnabled ? "[x] Lock" : "[ ] Lock";
+  String tout_str;
+  switch(g_settings.lockTimeoutMin){
+    case 0:  tout_str = "Immediate"; break;
+    case 1:  tout_str = "1 min";     break;
+    case 5:  tout_str = "5 min";     break;
+    case 15: tout_str = "15 min";    break;
+    case 60: tout_str = "60 min";    break;
+    default: tout_str = String(g_settings.lockTimeoutMin) + "m";
+  }
+
+  const char* items[] = {"Lock on/off", "Lock timeout", "Set PIN"};
+  String vals[] = {lock_str, tout_str, lockHasPinSet() ? "change" : "setup"};
+  for (int i = 0; i < 3; i++){
+    String line = String((i == sel) ? ">" : " ") + items[i];
+    if (i == 0) line = String((i == sel) ? ">" : " ") + vals[0];
+    else        line += ": " + vals[i];
+    oled.drawString(0, SB_H+14+i*13, line);
+  }
+  flush();
+}
+
+// ====== PAGE_SETTINGS_MESSAGES ======
+void uiDrawSettingsMessages(){
+  oled.clear();
+  uiDrawStatusBar();
+
+  oled.setFont(ArialMT_Plain_10);
+  oled.drawString(0, SB_H, "Messages");
+  menuDivider();
+
+  int sel = settingsMsgSelGet();
+
+  const char* prioLabel[] = {"Normal", "High", "SOS"};
+  String prio = prioLabel[min((int)g_settings.defaultPriority, 2)];
+
+  String hist;
+  switch(g_settings.historyDays){
+    case 0:  hist = "Off";    break;
+    case 1:  hist = "1 day";  break;
+    case 7:  hist = "7 days"; break;
+    case 30: hist = "30 days";break;
+    default: hist = String(g_settings.historyDays) + "d";
+  }
+
+  const char* labels[] = {"Default priority", "History"};
+  String vals[] = {prio, hist};
+  for (int i = 0; i < 2; i++){
+    String line = String((i == sel) ? ">" : " ") + labels[i] + ": " + vals[i];
+    oled.drawString(0, SB_H+14+i*13, line);
+  }
+  flush();
+}
+
+// ====== PAGE_SETTINGS_SYSTEM ======
+void uiDrawSettingsSystem(){
+  oled.clear();
+  uiDrawStatusBar();
+
+  oled.setFont(ArialMT_Plain_10);
+  oled.drawString(0, SB_H, "System");
+  menuDivider();
+
+  int sel = settingsSysSelGet();
+
+  String devId  = "ID: " + String(protocolDeviceId());
+  String freq   = "Freq: 915MHz";
+  const char* items[] = {"Device ID", "LoRa Freq", "Factory Reset"};
+  String vals[] = {String(protocolDeviceId()), "915MHz", ""};
+
+  for (int i = 0; i < 3; i++){
+    String line = String((i == sel) ? ">" : " ") + items[i];
+    if (i < 2) line += ": " + vals[i];
+    oled.drawString(0, SB_H+14+i*13, line);
+  }
+  flush();
+}
+
+// ====== PAGE_CONTACT_DETAIL ======
+void uiDrawContactDetail(){
+  oled.clear();
+  uiDrawStatusBar();
+
+  oled.setFont(ArialMT_Plain_10);
+
+  int sel   = storageContactsSel();
+  int cc    = storageContactCount();
+  if (sel < 0 || sel >= cc){ page = PAGE_CONTACTS; uiDrawContacts(); return; }
+
+  const Contact& c = storageContactAt(sel);
+  oled.drawString(0, SB_H, String(c.name) + " (" + String(c.id) + ")");
+  menuDivider();
+  oled.drawString(0, SB_H+14, protocolIsOnline(c.id) ? "* Online" : "  Offline");
+
+  int dsel = contactDetailSelGet();
+  const char* opts[] = {"Chat", "Delete"};
+  for (int i = 0; i < 2; i++){
+    oled.drawString(0, SB_H+30+i*12, String((i == dsel) ? ">" : " ") + opts[i]);
+  }
+  flush();
+}
+
+// ====== PAGE_PIN_SETUP / PAGE_PIN_CHANGE ======
+void uiDrawPinSetup(){
+  oled.clear();
+  uiDrawStatusBar();
+
+  oled.setFont(ArialMT_Plain_10);
+  bool isChange = (page == PAGE_PIN_CHANGE);
+  oled.drawString(0, SB_H,    isChange ? "Change PIN" : "Set PIN");
+  oled.drawString(0, SB_H+12, "Enter 4-8 digits:");
+
+  const String& typed = inputLockPin();
+  String stars = "";
+  for (size_t i = 0; i < typed.length(); i++) stars += "*";
+  oled.setFont(ArialMT_Plain_16);
+  oled.drawString(0, SB_H+24, stars);
+  if (blinkOn){
+    int w = oled.getStringWidth(stars);
+    oled.fillRect(w, SB_H+34, 6, 2);
+  }
+  oled.setFont(ArialMT_Plain_10);
+  flush();
+}
+
+// ====== PAGE_BT_PAIR ======
+void uiDrawBTPair(){
+  oled.clear();
+  uiDrawStatusBar();
+
+  oled.setFont(ArialMT_Plain_10);
+  oled.setTextAlignment(TEXT_ALIGN_LEFT);
+  oled.drawString(0, SB_H, "Pair via BT");
+  menuDivider();
+
+  BTPairState st = btpairState();
+
+  if (st == BTPAIR_IDLE){
+    extern int btpairSelGet();
+    int sel = btpairSelGet();
+    oled.drawString(0, SB_H+14, String(sel == 0 ? ">" : " ") + "Host (share key)");
+    oled.drawString(0, SB_H+26, String(sel == 1 ? ">" : " ") + "Join (scan)");
+    oled.drawString(0, SB_H+40, "U/D=Sel  E=Start  X=Back");
+  } else if (st == BTPAIR_DONE_OK){
+    oled.drawString(0, SB_H+14, "Done!");
+    oled.drawString(0, SB_H+26, btpairStatus());
+    oled.drawString(0, SB_H+40, "X=Back");
+  } else if (st == BTPAIR_DONE_FAIL){
+    oled.drawString(0, SB_H+14, "Failed.");
+    oled.drawString(0, SB_H+26, btpairStatus());
+    oled.drawString(0, SB_H+40, "X=Back");
+  } else {
+    String mode = (st == BTPAIR_HOST) ? "[Host]" : "[Join]";
+    oled.drawString(0, SB_H+14, mode);
+    oled.drawString(0, SB_H+26, btpairStatus());
+    oled.drawString(0, SB_H+40, "X=Cancel");
+  }
+  flush();
+}
+
+// ====== Helpers ======
 void uiForceBlinkRestart(){
-   // prevent spam resets faster than every 120ms
   uint32_t now = millis();
   if (now - lastForcedBlink < 120) return;
   lastForcedBlink = now;
-
-  lastBlink = millis();    // so next uiTick waits a full period
-  blinkOn   = true;        // caret immediately visible on next draw
+  lastBlink = now;
+  blinkOn   = true;
 }
 
 void uiToast(const String& m){
-  oled.fillRect(0,52,128,12);
+  oled.fillRect(0, 52, 128, 12);
   oled.setColor(BLACK);
-  oled.drawString(2,52,m);
+  oled.drawString(2, 52, m);
   oled.setColor(WHITE);
   flush();
 }
 
-void uiDrawRadioDebugOverlay(){
-  // draw a tiny single-line status at the very bottom row
-  oled.setTextAlignment(TEXT_ALIGN_LEFT);
-  oled.setFont(ArialMT_Plain_10);
-  char line[40];
-  // why: 0 ok, 1 short, 2 crc, 3 dst
-  snprintf(line, sizeof(line), "RX:%lu T:%u F:%u->%u L? RSSI:%d W:%u",
-           (unsigned long)dbg_rxCount, dbg_lastType, dbg_lastFrom, dbg_lastTo, dbg_lastRssi, dbg_lastWhy);
-  oled.drawString(0, 54, line); // adjust Y if your footer uses 56
+void uiDebugBlinkOverlay(){
+  const int x = 0, y = 0, sz = 4;
+  if (blinkOn){
+    oled.setColor(WHITE); oled.fillRect(x, y, sz, sz);
+  } else {
+    oled.setColor(BLACK); oled.fillRect(x, y, sz, sz);
+    oled.setColor(WHITE);
+  }
+  flush();
 }
 
-void uiDebugBlinkOverlay() {
-  // Draw a 4x4 dot in the top-left that flips state with blinkOn.
-  // Does not clear the screen; very cheap.
-  const int x = 0, y = 0, sz = 4;
-  if (blinkOn) {
-    oled.setColor(WHITE);
-    oled.fillRect(x, y, sz, sz);
-  } else {
-    oled.setColor(BLACK);
-    oled.fillRect(x, y, sz, sz);
-    oled.setColor(WHITE);     // restore for normal drawing
-  }
-  oled.display();
-}
+
+
+

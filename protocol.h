@@ -4,72 +4,87 @@
 
 #define BROADCAST_ID 0xFF
 
-// Messaging types
+// Message types
 enum MsgType : uint8_t {
   TYPE_DATA     = 1,
   TYPE_ACK      = 2,
   TYPE_DISC_REQ = 10,
   TYPE_DISC_RSP = 11,
-  TYPE_INV_REQ  = 20,   // inviter -> invitee (contains 6-digit code + name)
-  TYPE_INV_ACK  = 21    // invitee -> inviter (echoes code + name)
+  TYPE_INV_REQ  = 20,
+  TYPE_INV_ACK  = 21
+};
+
+// Message priority
+enum MsgPriority : uint8_t {
+  PRIORITY_NORMAL = 0,   // 3 retries, 1200ms timeout
+  PRIORITY_HIGH   = 1,   // 7 retries, 800ms timeout
+  PRIORITY_SOS    = 2    // 15 retries + repeat every 30s, 600ms timeout
 };
 
 enum MsgStatus : uint8_t { ST_QUEUED, ST_SENT, ST_DELIVERED, ST_FAILED, ST_RECV };
 
 struct ChatMsg {
-  uint8_t   from;
-  String    text;
-  MsgStatus status;
-  uint16_t  seq;
+  uint8_t     from;
+  String      text;
+  MsgStatus   status;
+  uint16_t    seq;
+  MsgPriority priority;
+  uint32_t    timestamp;  // millis() at receive/send time
 };
 
-// Nearby search cache (legacy helpers still exposed)
+// Discovery (for UI Search page)
 struct NearbyItem {
   uint8_t id;
   char    name[16];
 };
 
-// Discovery (for UI Search page)
 struct DiscEntry {
   uint8_t   id;
-  char      name[21];   // 20 + null
+  char      name[21];
   int8_t    rssi;
   uint32_t  lastSeen;
 };
 
 const int MAX_DISC = 10;
 
-// Exposed discovery list for UI overlay (debug/status)
 extern DiscEntry g_disc[MAX_DISC];
 extern int       g_discCount;
 
-// Debug counters for uiDrawRadioDebugOverlay()
+// Debug counters
 extern uint32_t dbg_rxCount;
 extern int8_t   dbg_lastRssi;
 extern uint8_t  dbg_lastType, dbg_lastFrom, dbg_lastTo, dbg_lastWhy;
 
+// SOS state
+extern bool     g_sosActive;
+extern int      g_sosSentCount;
+
 // Init & loop
 void protocolInit();
 void protocolPoll();
-void protocolSearchTick();         // call from loop (keeps discovery alive)
-void protocolPendingTick();        // non-blocking retry timer tick
+void protocolSearchTick();
+void protocolPendingTick();
 
-// Discovery broadcast
+// Discovery
 void protocolSendDiscReq();
 
-// Nearby (legacy simple list kept for compatibility)
-int  protocolNearbyCount();
+// Nearby (legacy)
+int        protocolNearbyCount();
 NearbyItem protocolNearbyAt(int i);
-void protocolNearbyClear();
-void protocolNearbyMoveSel(int delta);
-int  protocolNearbySel();
+void       protocolNearbyClear();
+void       protocolNearbyMoveSel(int delta);
+int        protocolNearbySel();
 
-// Invite / accept handshake
-void      protocolStartInvite();                      // start invite to selected nearby
-uint32_t  protocolInviteCode();                       // current 6-digit code you generated
-uint8_t   protocolInviteeId();                        // current target id
-void      protocolCancelInvite();                     // cancel in-flight invite
-const char* protocolLastInviterName();                // optional display
+// Discovery helpers
+bool  protocolIsOnline(uint8_t id);    // seen in last 30s
+int8_t protocolContactRssi(uint8_t id);
+
+// Invite / accept
+void      protocolStartInvite();
+uint32_t  protocolInviteCode();
+uint8_t   protocolInviteeId();
+void      protocolCancelInvite();
+const char* protocolLastInviterName();
 
 bool protocolSendInviteRequest(uint8_t to, uint32_t code6);
 bool protocolSendInviteAccept(uint8_t to, uint32_t code6);
@@ -77,23 +92,39 @@ bool protocolSendInviteAccept(uint8_t to, uint32_t code6);
 // Chat
 uint8_t protocolDeviceId();
 void    protocolEnterChat(uint8_t peerId);
-void    protocolSendChat(const String& text);
+void    protocolSendChat(const String& text, MsgPriority priority = PRIORITY_NORMAL);
 void    protocolBroadcast(const String& text);
 
-// Chat buffer queries for UI
-int   protocolChatCount();
-void  protocolGetChat(int idx, ChatMsg& out);
-int   protocolScrollOffset();
-void  protocolScroll(int delta);
+// SOS
+void protocolStartSOS();
+void protocolStopSOS();
+void protocolSOSTick();   // resend every 30s
 
-// ACK handling (called internally from protocolPoll)
+// Chat buffer
+int  protocolChatCount();
+void protocolGetChat(int idx, ChatMsg& out);
+int  protocolScrollOffset();
+void protocolScroll(int delta);
+void protocolClearChat();
+
+// ACK handling
 void protocolOnAckFrom(uint8_t fromPeer, uint16_t seq);
 
-// (internal send state, exposed so other modules can call tick)
-void protocolStartSend(uint8_t to, uint16_t seq, const String& text);
+// Internal
+void protocolStartSend(uint8_t to, uint16_t seq, const String& text, MsgPriority pri);
 
-// Discovery upsert (used by protocolPoll and UI)
+// Discovery upsert
 void discUpsert(uint8_t id, const char* nm, int8_t rssi);
 
-// Optional: allow UI to set a status on a chat row
+// Allow UI to set a status on a chat row
 void protocolSetChatStatus(int idx, MsgStatus st);
+
+// History integration — called from history.cpp when loading persisted msgs
+void protocolPushHistoryMsg(uint8_t from, const String& txt, MsgStatus s);
+
+// Unread count per contact
+int  protocolUnreadCount(uint8_t contactId);
+void protocolMarkRead(uint8_t contactId);
+
+// Current chat peer
+uint8_t protocolCurrentPeer();

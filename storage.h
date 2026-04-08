@@ -19,6 +19,7 @@ int  storageFindContact(uint8_t id);
 bool storageAddContact(const Contact& c);
 void storageSaveContacts();
 
-void storageFactoryReset();   // wipe name + contacts
-void storageClearContacts();  // wipe contacts only
-void storageClearName();      // wipe name only
+void storageFactoryReset();          // wipe name + contacts
+void storageClearContacts();         // wipe contacts only
+void storageClearName();             // wipe name only
+bool storageDeleteContact(uint8_t id); // remove one contact by id

@@ -1,4 +1,3 @@
-
 #pragma once
 #include <Arduino.h>
 
@@ -12,17 +11,44 @@ String&       storageComposeMut();
 bool inputUppercase();
 bool inputNumbers();
 
-// Contacts page selection exposure
+// Contacts page selection
 int  storageContactsSel();
 void storageContactsSelSet(int v);
 
+// Config menu (8 items)
+static constexpr int CONFIG_ITEMS = 8;
 int  configSelGet();
 void configSelSet(int v);
 
-// Confirm dialog (0 = No, 1 = Yes)
+// Confirm dialog (0=No, 1=Yes)
 int  confirmSelGet();
 void confirmSelSet(int v);
 void confirmSelToggle();
 
+// Search selection
 int  searchSelGet();
 void searchSelSet(int v);
+
+// Settings sub-page selections
+int  settingsNotifySelGet();
+void settingsNotifySelSet(int v);
+int  settingsPowerSelGet();
+void settingsPowerSelSet(int v);
+int  settingsSecSelGet();
+void settingsSecSelSet(int v);
+int  settingsMsgSelGet();
+void settingsMsgSelSet(int v);
+int  settingsSysSelGet();
+void settingsSysSelSet(int v);
+
+// Contact detail selection (0=Chat, 1=Delete)
+int  contactDetailSelGet();
+void contactDetailSelSet(int v);
+
+// BT Pair page selection (0=Host, 1=Join)
+int  btpairSelGet();
+void btpairSelSet(int v);
+
+// Lock PIN input buffer (separate from compose)
+const String& inputLockPin();
+void          inputLockPinClear();

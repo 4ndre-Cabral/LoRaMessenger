@@ -21,6 +21,32 @@ void derivePairKey(const String& a, const String& b, uint32_t code6, const uint8
   sha256(buf, sizeof(buf), outKey);
 }
 
+void hmacSign(const uint8_t key[32], const uint8_t nonce4[4], const uint8_t* msg, size_t len, uint8_t tag4[4]){
+  // Derive auth subkey: SHA256(key || "auth")
+  uint8_t sigKey[32];
+  uint8_t kmat[36];
+  memcpy(kmat, key, 32);
+  kmat[32]='a'; kmat[33]='u'; kmat[34]='t'; kmat[35]='h';
+  sha256(kmat, 36, sigKey);
+
+  // tag = SHA256(sigKey || nonce4 || plaintext)
+  // max len = 151 bytes, so tbuf max = 32+4+151 = 187 bytes (safe on ESP32 stack)
+  uint8_t tbuf[32 + 4 + 151];
+  size_t clen = (len > 151) ? 151 : len;
+  memcpy(tbuf, sigKey, 32);
+  memcpy(tbuf + 32, nonce4, 4);
+  memcpy(tbuf + 36, msg, clen);
+  uint8_t tag32[32];
+  sha256(tbuf, 36 + clen, tag32);
+  memcpy(tag4, tag32, 4);
+}
+
+bool hmacVerify(const uint8_t key[32], const uint8_t nonce4[4], const uint8_t* msg, size_t len, const uint8_t tag4[4]){
+  uint8_t expected[4];
+  hmacSign(key, nonce4, msg, len, expected);
+  return memcmp(expected, tag4, 4) == 0;
+}
+
 void keystreamXor(const uint8_t key[32], const uint8_t nonce4[4], uint8_t* buf, size_t len){
   uint32_t counter=0;
   size_t off=0;
